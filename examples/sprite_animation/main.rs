@@ -7,7 +7,9 @@ use amethyst::{
         get_animation_set, AnimationBundle, AnimationCommand, AnimationControlSet, AnimationSet,
         AnimationSetPrefab, EndControl,
     },
-    assets::{PrefabData, PrefabLoader, PrefabLoaderSystem, ProgressCounter, RonFormat},
+    assets::{
+        Handle, Prefab, PrefabData, PrefabLoader, PrefabLoaderSystem, ProgressCounter, RonFormat,
+    },
     config::Config,
     core::transform::{Transform, TransformBundle},
     derive::PrefabData,
@@ -38,65 +40,87 @@ struct MyPrefabData {
     animation_set: AnimationSetPrefab<AnimationId, SpriteRender>,
 }
 
-/// The main state
+/// The loading state
 #[derive(Default)]
-struct Example {
+struct Loading {
     /// A progress tracker to check that assets are loaded
-    pub progress_counter: Option<ProgressCounter>,
+    progress_counter: ProgressCounter,
+    /// Handle to the loading prefab data
+    prefab_handle: Option<Handle<Prefab<MyPrefabData>>>,
+}
+
+impl SimpleState for Loading {
+    fn on_start(&mut self, data: StateData<'_, GameData<'_, '_>>) {
+        let StateData { world, .. } = data;
+        // Starts asset loading
+        self.prefab_handle = Some(world.exec(|loader: PrefabLoader<'_, MyPrefabData>| {
+            loader.load(
+                "prefab/sprite_animation.ron",
+                RonFormat,
+                (),
+                &mut self.progress_counter,
+            )
+        }));
+    }
+
+    fn update(&mut self, data: &mut StateData<'_, GameData<'_, '_>>) -> SimpleTrans {
+        // Checks if we are still loading data
+        if self.progress_counter.is_complete() {
+            Trans::Switch(Box::new(Example {
+                prefab_handle: self
+                    .prefab_handle
+                    .as_ref()
+                    .expect("Failed to load prefab data.")
+                    .clone(),
+            }))
+        } else {
+            Trans::None
+        }
+    }
+}
+
+/// The main state
+struct Example {
+    /// Handle to the loaded prefab
+    pub prefab_handle: Handle<Prefab<MyPrefabData>>,
 }
 
 impl SimpleState for Example {
     fn on_start(&mut self, data: StateData<'_, GameData<'_, '_>>) {
         let StateData { world, .. } = data;
-        // Crates new progress counter
-        self.progress_counter = Some(Default::default());
-        // Starts asset loading
-        let prefab_handle = world.exec(|loader: PrefabLoader<'_, MyPrefabData>| {
-            loader.load(
-                "prefab/sprite_animation.ron",
-                RonFormat,
-                (),
-                self.progress_counter.as_mut().unwrap(),
-            )
-        });
-        // Creates new entities with components from MyPrefabData
-        world.create_entity().with(prefab_handle).build();
         // Creates a new camera
         initialise_camera(world);
+        // Creates new entities with components from MyPrefabData
+        world
+            .create_entity()
+            .with(self.prefab_handle.clone())
+            .build();
+        // Execute a pass similar to a system
+        world.exec(
+            |(entities, animation_sets, mut control_sets): (
+                Entities,
+                ReadStorage<AnimationSet<AnimationId, SpriteRender>>,
+                WriteStorage<AnimationControlSet<AnimationId, SpriteRender>>,
+            )| {
+                // For each entity that has AnimationSet
+                for (entity, animation_set) in (&entities, &animation_sets).join() {
+                    // Creates a new AnimationControlSet for the entity
+                    let control_set = get_animation_set(&mut control_sets, entity).unwrap();
+                    // Adds the `Fly` animation to AnimationControlSet and loops infinitely
+                    control_set.add_animation(
+                        AnimationId::Fly,
+                        &animation_set.get(&AnimationId::Fly).unwrap(),
+                        EndControl::Loop(None),
+                        1.0,
+                        AnimationCommand::Start,
+                    );
+                }
+            },
+        );
     }
 
     fn update(&mut self, data: &mut StateData<'_, GameData<'_, '_>>) -> SimpleTrans {
-        // Checks if we are still loading data
-        if let Some(ref progress_counter) = self.progress_counter {
-            // Checks progress
-            if progress_counter.is_complete() {
-                let StateData { world, .. } = data;
-                // Execute a pass similar to a system
-                world.exec(
-                    |(entities, animation_sets, mut control_sets): (
-                        Entities,
-                        ReadStorage<AnimationSet<AnimationId, SpriteRender>>,
-                        WriteStorage<AnimationControlSet<AnimationId, SpriteRender>>,
-                    )| {
-                        // For each entity that has AnimationSet
-                        for (entity, animation_set) in (&entities, &animation_sets).join() {
-                            // Creates a new AnimationControlSet for the entity
-                            let control_set = get_animation_set(&mut control_sets, entity).unwrap();
-                            // Adds the `Fly` animation to AnimationControlSet and loops infinitely
-                            control_set.add_animation(
-                                AnimationId::Fly,
-                                &animation_set.get(&AnimationId::Fly).unwrap(),
-                                EndControl::Loop(None),
-                                1.0,
-                                AnimationCommand::Start,
-                            );
-                        }
-                    },
-                );
-                // All data loaded
-                self.progress_counter = None;
-            }
-        }
+        // Remain in main state forever
         Trans::None
     }
 }
@@ -142,7 +166,7 @@ fn main() -> amethyst::Result<()> {
         ))?
         .with_bundle(RenderBundle::new(pipe, Some(display_config)).with_sprite_sheet_processor())?;
 
-    let mut game = Application::new(assets_directory, Example::default(), game_data)?;
+    let mut game = Application::new(assets_directory, Loading::default(), game_data)?;
     game.run();
 
     Ok(())
